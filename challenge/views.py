@@ -198,18 +198,32 @@ class DoItFast(View):
             }
         )
 
-def _sanitize_username(username: str) -> str:
-    return "".join(ch for ch in username if ch.isalnum() or ch in "-_")
+# Lab containers are owned by the user's immutable primary key, never by a
+# sanitized username: "a.b", "a+b" and "ab" would all sanitize to "ab".
+LAB_OWNER_LABEL = "pygoat.owner_id"
+
+
+def _lab_owner_id(user) -> str:
+    return f"u{user.pk}"
+
+
+def _lab_prefix(user) -> str:
+    # Not "lab-": old containers were "lab-<sanitized username>-<lab>", so a
+    # leftover "lab-u5-<lab>" of user "u5" must never match user id 5.
+    return f"pglab-{_lab_owner_id(user)}-"
 
 
 def _sanitize_image_name(name: str) -> str:
     return "".join(ch for ch in name if ch.isalnum() or ch in "-_")
 
 
-def _get_container_name(username: str, lab_image_name: str) -> str:
-    safe_username = _sanitize_username(username)
+def _get_container_name(user, lab_image_name: str) -> str:
     safe_image = _sanitize_image_name(lab_image_name)
-    return f"lab-{safe_username}-{safe_image}"
+    return f"{_lab_prefix(user)}{safe_image}"
+
+
+def _is_owned_by(container, user) -> bool:
+    return (container.labels or {}).get(LAB_OWNER_LABEL) == str(user.pk)
 
 
 def _get_lab_config(lab_image_name: str) -> dict:
@@ -283,7 +297,7 @@ def _get_container_or_none(client, container_id: str):
 
 
 @contextmanager
-def _user_lab_lock(username: str):
+def _user_lab_lock(user):
     """
     Serialize the quota check and container creation for one user across
     gunicorn workers/threads, so parallel requests can't exceed the limit.
@@ -292,7 +306,7 @@ def _user_lab_lock(username: str):
     if fcntl is None:
         yield
         return
-    path = os.path.join(tempfile.gettempdir(), f"pygoat-lab-{_sanitize_username(username)}.lock")
+    path = os.path.join(tempfile.gettempdir(), f"pygoat-lab-{_lab_owner_id(user)}.lock")
     with open(path, "w") as fh:
         fcntl.flock(fh, fcntl.LOCK_EX)
         try:
@@ -301,11 +315,10 @@ def _user_lab_lock(username: str):
             fcntl.flock(fh, fcntl.LOCK_UN)
 
 
-def _get_user_containers(client, username: str):
-    safe_username = _sanitize_username(username)
-    container_prefix = f"lab-{safe_username}-"
-    containers = client.containers.list(all=True)
-    return [c for c in containers if c.name.startswith(container_prefix)]
+def _get_user_containers(client, user):
+    container_prefix = _lab_prefix(user)
+    containers = client.containers.list(all=True, filters={"label": f"{LAB_OWNER_LABEL}={user.pk}"})
+    return [c for c in containers if c.name.startswith(container_prefix) and _is_owned_by(c, user)]
 
 def _discard_container(container, remove):
     if remove:
@@ -357,9 +370,9 @@ def start_lab(request, lab_image_name):
     if client is None:
         return JsonResponse({'status': 'error', 'message': 'Docker daemon unavailable'}, status=503)
 
-    username = request.user.username
+    user = request.user
     safe_image = _sanitize_image_name(lab_image_name)
-    container_name = _get_container_name(username, lab_image_name)
+    container_name = _get_container_name(user, lab_image_name)
     domain = getattr(settings, 'LAB_DOMAIN', 'localhost')
     lab_url = f"http://{container_name}.{domain}"
 
@@ -380,13 +393,15 @@ def start_lab(request, lab_image_name):
             _ensure_image_built(client, safe_image, build_location)
 
         created = False
-        with _user_lab_lock(username):
+        with _user_lab_lock(user):
             # Re-read: a parallel request may have created/started it meanwhile
             container = _get_container_or_none(client, container_name)
+            if container is not None and not _is_owned_by(container, user):
+                return JsonResponse({'status': 'error', 'message': 'Lab container name is in use by another owner'}, status=409)
             if container is None or container.status != 'running':
                 try:
                     running_others = [
-                        c for c in _get_user_containers(client, username)
+                        c for c in _get_user_containers(client, user)
                         if c.name != container_name and c.status == 'running'
                     ]
                 except Exception:
@@ -395,7 +410,7 @@ def start_lab(request, lab_image_name):
                     return JsonResponse({'status': 'error', 'message': f'Per-user lab limit reached ({per_user_limit})'}, status=429)
 
             if container is None:
-                container = _create_lab_container(client, safe_image, container_name, domain, lab_port)
+                container = _create_lab_container(client, safe_image, container_name, domain, lab_port, user)
                 created = True
             elif container.status != 'running':
                 container.start()
@@ -408,8 +423,9 @@ def start_lab(request, lab_image_name):
         return JsonResponse({'status': 'error', 'message': str(e)}, status=500)
 
 
-def _create_lab_container(client, image, container_name, domain, lab_port):
+def _create_lab_container(client, image, container_name, domain, lab_port, user):
     labels = {
+        LAB_OWNER_LABEL: str(user.pk),
         "traefik.enable": "true",
         f"traefik.http.routers.{container_name}.rule": f"Host(`{container_name}.{domain}`)",
         f"traefik.http.services.{container_name}.loadbalancer.server.port": lab_port,
@@ -457,13 +473,13 @@ def stop_user_labs(request):
     if not request.user.is_authenticated:
         return JsonResponse({'status': 'error', 'message': 'Authentication required'}, status=401)
     
-    username = request.user.username
+    user = request.user
     client = get_docker_client()
     if client is None:
         return JsonResponse({'status': 'error', 'message': 'Docker daemon unavailable'}, status=503)
 
     try:
-        user_containers = _get_user_containers(client, username)
+        user_containers = _get_user_containers(client, user)
         
         stopped_count = 0
         for container in user_containers:
@@ -489,13 +505,13 @@ def list_user_labs(request):
     if not request.user.is_authenticated:
         return JsonResponse({'status': 'error', 'message': 'Authentication required'}, status=401)
 
-    username = request.user.username
+    user = request.user
     client = get_docker_client()
     if client is None:
         return JsonResponse({'status': 'error', 'message': 'Docker daemon unavailable'}, status=503)
 
     try:
-        user_containers = _get_user_containers(client, username)
+        user_containers = _get_user_containers(client, user)
         labs = []
         for c in user_containers:
             labs.append({
@@ -511,15 +527,15 @@ def stop_lab(request, lab_image_name):
     if not request.user.is_authenticated:
         return JsonResponse({'status': 'error', 'message': 'Authentication required'}, status=401)
 
-    username = request.user.username
-    container_name = _get_container_name(username, lab_image_name)
+    user = request.user
+    container_name = _get_container_name(user, lab_image_name)
 
     client = get_docker_client()
     if client is None:
         return JsonResponse({'status': 'error', 'message': 'Docker daemon unavailable'}, status=503)
 
     try:
-        user_containers = _get_user_containers(client, username)
+        user_containers = _get_user_containers(client, user)
         container = next((c for c in user_containers if c.name == container_name), None)
         if container is None:
             return JsonResponse({'status': 'error', 'message': 'Lab container not found'}, status=404)
