@@ -41,6 +41,17 @@ This starts PyGoat, Traefik and everything the labs need.
 4. Open the app at <http://lvh.me:8000> (not `localhost`). Labs are served at `pglab-u<user id>-<lab>.lvh.me` (named after the numeric account id, not the username) and are only accessible to the user who started them, which requires the login cookie to be shared across `*.lvh.me`. When upgrading from a version that named labs `lab-<username>-<lab>`, remove the old lab containers with `docker rm -f $(docker ps -aq --filter name=^lab-)`.
 5. Stop everything with `docker compose down`.
 
+### End-to-end tests
+
+With the stack running (steps 2-4), run the lab isolation tests, which sign up two users and check over HTTP and Traefik that neither can open, list or stop the other's labs:
+
+```bash
+pip install requests
+PYGOAT_E2E=1 python -m unittest discover -s e2e -v
+```
+
+The first run builds the `xss_lab` image if it isn't built yet. Set `PYGOAT_E2E_LAB` to test another lab.
+
 > The `pygoat/pygoat` image on Docker Hub is the old v2 release and does not include the v3 labs. Use Docker Compose instead.
 
 ### From Sources
