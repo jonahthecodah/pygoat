@@ -21,7 +21,7 @@ class TraefikAuthVerifyTests(TestCase):
         return self.client.get(self.url, HTTP_X_FORWARDED_HOST=host)
 
     def host(self, user, lab="xss_lab", domain="lvh.me"):
-        return f"lab-u{user.pk}-{lab}.{domain}"
+        return f"pglab-u{user.pk}-{lab}.{domain}"
 
     def test_owner_is_allowed(self):
         resp = self.verify(self.host(self.alice), self.alice)
@@ -29,7 +29,7 @@ class TraefikAuthVerifyTests(TestCase):
         self.assertEqual(resp["X-Forwarded-User"], "alice")
 
     def test_host_with_port_and_mixed_case_is_allowed(self):
-        resp = self.verify(f"LAB-U{self.alice.pk}-XSS_lab.lvh.me:80", self.alice)
+        resp = self.verify(f"PGLAB-U{self.alice.pk}-XSS_lab.lvh.me:80", self.alice)
         self.assertEqual(resp.status_code, 200)
 
     def test_anonymous_is_rejected(self):
@@ -47,6 +47,10 @@ class TraefikAuthVerifyTests(TestCase):
         mallory = User.objects.create_user("al.ice", password="pw")
         self.assertEqual(self.verify(self.host(self.alice), mallory).status_code, 403)
         self.assertEqual(self.verify(self.host(mallory), mallory).status_code, 200)
+
+    def test_legacy_username_lab_is_forbidden_for_matching_id(self):
+        # Old scheme: user "u<pk>" owned "lab-u<pk>-<lab>"; it must not open for user id <pk>
+        self.assertEqual(self.verify(f"lab-u{self.alice.pk}-xss_lab.lvh.me", self.alice).status_code, 403)
 
     def test_user_id_prefix_does_not_match_longer_id(self):
         other = User.objects.create_user("other", password="pw", pk=int(f"{self.alice.pk}2"))

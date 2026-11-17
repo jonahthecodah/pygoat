@@ -38,7 +38,7 @@ This starts PyGoat, Traefik and everything the labs need.
    ```
    (Older Docker installs use `docker-compose up -d`.)
 3. The first run builds every lab image before the web app starts, which can take 10 minutes or more. Follow the progress with `docker compose logs -f migration`. Later runs reuse the images and start quickly.
-4. Open the app at <http://lvh.me:8000> (not `localhost`). Labs are served at `lab-u<user id>-<lab>.lvh.me` (named after the numeric account id, not the username) and are only accessible to the user who started them, which requires the login cookie to be shared across `*.lvh.me`. When upgrading from a version that named labs `lab-<username>-<lab>`, remove the old lab containers with `docker rm -f $(docker ps -aq --filter name=^lab-)`.
+4. Open the app at <http://lvh.me:8000> (not `localhost`). Labs are served at `pglab-u<user id>-<lab>.lvh.me` (named after the numeric account id, not the username) and are only accessible to the user who started them, which requires the login cookie to be shared across `*.lvh.me`. When upgrading from a version that named labs `lab-<username>-<lab>`, remove the old lab containers with `docker rm -f $(docker ps -aq --filter name=^lab-)`.
 5. Stop everything with `docker compose down`.
 
 > The `pygoat/pygoat` image on Docker Hub is the old v2 release and does not include the v3 labs. Use Docker Compose instead.

@@ -214,7 +214,7 @@ class LabQuotaTests(TestCase):
     def _container(self, lab, status, owner=None):
         owner = owner or self.user
         c = MagicMock()
-        c.name, c.status = f"lab-u{owner.pk}-{lab}", status
+        c.name, c.status = f"pglab-u{owner.pk}-{lab}", status
         c.labels = {"pygoat.owner_id": str(owner.pk)}
         return c
 
@@ -264,7 +264,7 @@ class LabOwnerIdentityTests(TestCase):
         self.ab = User.objects.create_user("ab", password="pw")
         self.a_dot_b = User.objects.create_user("a.b", password="pw")
         lab = MagicMock()
-        lab.name, lab.status = f"lab-u{self.ab.pk}-xss_lab", "running"
+        lab.name, lab.status = f"pglab-u{self.ab.pk}-xss_lab", "running"
         lab.labels = {"pygoat.owner_id": str(self.ab.pk)}
         lab.attrs = {"State": {"Health": {"Status": "healthy"}}}
         self.ab_lab = lab
@@ -311,9 +311,9 @@ class LabOwnerIdentityTests(TestCase):
         self.client.force_login(self.a_dot_b)
         resp = self.client.get("/challenge/start-lab/xss_lab/")
         self.assertEqual(resp.status_code, 200, resp.content)
-        self.assertIn(f"lab-u{self.a_dot_b.pk}-xss_lab.", resp.json()["url"])
+        self.assertIn(f"pglab-u{self.a_dot_b.pk}-xss_lab.", resp.json()["url"])
         kwargs = client.containers.create.call_args.kwargs
-        self.assertEqual(kwargs["name"], f"lab-u{self.a_dot_b.pk}-xss_lab")
+        self.assertEqual(kwargs["name"], f"pglab-u{self.a_dot_b.pk}-xss_lab")
         self.assertEqual(kwargs["labels"]["pygoat.owner_id"], str(self.a_dot_b.pk))
 
     @patch("challenge.views.check_traefik_reachable", return_value=True)

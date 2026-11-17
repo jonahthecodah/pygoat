@@ -207,13 +207,19 @@ def _lab_owner_id(user) -> str:
     return f"u{user.pk}"
 
 
+def _lab_prefix(user) -> str:
+    # Not "lab-": old containers were "lab-<sanitized username>-<lab>", so a
+    # leftover "lab-u5-<lab>" of user "u5" must never match user id 5.
+    return f"pglab-{_lab_owner_id(user)}-"
+
+
 def _sanitize_image_name(name: str) -> str:
     return "".join(ch for ch in name if ch.isalnum() or ch in "-_")
 
 
 def _get_container_name(user, lab_image_name: str) -> str:
     safe_image = _sanitize_image_name(lab_image_name)
-    return f"lab-{_lab_owner_id(user)}-{safe_image}"
+    return f"{_lab_prefix(user)}{safe_image}"
 
 
 def _is_owned_by(container, user) -> bool:
@@ -310,7 +316,7 @@ def _user_lab_lock(user):
 
 
 def _get_user_containers(client, user):
-    container_prefix = f"lab-{_lab_owner_id(user)}-"
+    container_prefix = _lab_prefix(user)
     containers = client.containers.list(all=True, filters={"label": f"{LAB_OWNER_LABEL}={user.pk}"})
     return [c for c in containers if c.name.startswith(container_prefix) and _is_owned_by(c, user)]
 
