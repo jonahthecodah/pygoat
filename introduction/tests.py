@@ -20,36 +20,44 @@ class TraefikAuthVerifyTests(TestCase):
             self.client.force_login(user)
         return self.client.get(self.url, HTTP_X_FORWARDED_HOST=host)
 
+    def host(self, user, lab="xss_lab", domain="lvh.me"):
+        return f"lab-u{user.pk}-{lab}.{domain}"
+
     def test_owner_is_allowed(self):
-        resp = self.verify("lab-alice-xss_lab.lvh.me", self.alice)
+        resp = self.verify(self.host(self.alice), self.alice)
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp["X-Forwarded-User"], "alice")
 
     def test_host_with_port_and_mixed_case_is_allowed(self):
-        resp = self.verify("LAB-Alice-XSS_lab.lvh.me:80", self.alice)
+        resp = self.verify(f"LAB-U{self.alice.pk}-XSS_lab.lvh.me:80", self.alice)
         self.assertEqual(resp.status_code, 200)
 
     def test_anonymous_is_rejected(self):
-        self.assertEqual(self.verify("lab-alice-xss_lab.lvh.me").status_code, 401)
+        self.assertEqual(self.verify(self.host(self.alice)).status_code, 401)
 
     def test_other_users_lab_is_forbidden(self):
-        resp = self.verify("lab-alice-bob-xss_lab.lvh.me", self.alice)
-        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(self.verify(self.host(self.alice_bob), self.alice).status_code, 403)
+        self.assertEqual(self.verify(self.host(self.alice), self.alice_bob).status_code, 403)
 
-    def test_hyphenated_username_owner_is_allowed(self):
-        resp = self.verify("lab-alice-bob-xss_lab.lvh.me", self.alice_bob)
-        self.assertEqual(resp.status_code, 200)
+    def test_username_based_host_is_forbidden(self):
+        self.assertEqual(self.verify("lab-alice-xss_lab.lvh.me", self.alice).status_code, 403)
 
-    def test_hyphenated_user_cannot_reach_prefix_user(self):
-        resp = self.verify("lab-alice-xss_lab.lvh.me", self.alice_bob)
-        self.assertEqual(resp.status_code, 403)
+    def test_colliding_sanitized_username_is_forbidden(self):
+        # "al.ice" used to sanitize to "alice" and share alice's labs
+        mallory = User.objects.create_user("al.ice", password="pw")
+        self.assertEqual(self.verify(self.host(self.alice), mallory).status_code, 403)
+        self.assertEqual(self.verify(self.host(mallory), mallory).status_code, 200)
+
+    def test_user_id_prefix_does_not_match_longer_id(self):
+        other = User.objects.create_user("other", password="pw", pk=int(f"{self.alice.pk}2"))
+        self.assertEqual(self.verify(self.host(other), self.alice).status_code, 403)
 
     def test_unknown_lab_is_forbidden(self):
-        resp = self.verify("lab-alice-not_a_lab.lvh.me", self.alice)
+        resp = self.verify(self.host(self.alice, lab="not_a_lab"), self.alice)
         self.assertEqual(resp.status_code, 403)
 
     def test_foreign_domain_is_rejected(self):
-        resp = self.verify("lab-alice-xss_lab.evil.com", self.alice)
+        resp = self.verify(self.host(self.alice, domain="evil.com"), self.alice)
         self.assertEqual(resp.status_code, 400)
 
     def test_missing_forwarded_host_is_rejected(self):

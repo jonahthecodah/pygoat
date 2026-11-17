@@ -10,7 +10,7 @@ from django.shortcuts import redirect, render
 from django.views.decorators.csrf import csrf_exempt
 
 from challenge.models import Lab
-from challenge.views import _sanitize_image_name, _sanitize_username
+from challenge.views import _lab_owner_id, _sanitize_image_name
 
 from .forms import NewUserForm
 
@@ -73,7 +73,7 @@ def traefik_auth_verify(request):
     """
     Traefik ForwardAuth target: allow a request to a lab subdomain only if it
     belongs to the logged-in user, i.e. the host is exactly
-    lab-<sanitized username>-<known lab>.<LAB_DOMAIN> (see challenge.views).
+    lab-u<user id>-<known lab>.<LAB_DOMAIN> (see challenge.views).
     """
     if not request.user.is_authenticated:
         return HttpResponse(status=401)
@@ -85,9 +85,9 @@ def traefik_auth_verify(request):
         return HttpResponseBadRequest("Invalid host header")
     subdomain = host[: -len(domain) - 1]
 
-    # Compare against the full owner prefix, not a "-"-split field, so user
-    # "alice" can't match "lab-alice-bob-<lab>" owned by "alice-bob".
-    prefix = f"lab-{_sanitize_username(request.user.username)}-".lower()
+    # Owner is the immutable user id; compare the full prefix so user 1
+    # can't match "lab-u12-<lab>" owned by user 12.
+    prefix = f"lab-{_lab_owner_id(request.user)}-".lower()
     if not subdomain.startswith(prefix):
         return HttpResponse(status=403)
 

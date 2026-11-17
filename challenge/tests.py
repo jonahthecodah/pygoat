@@ -9,7 +9,9 @@ from django.contrib.auth.models import User
 from django.test import TestCase, override_settings
 
 from challenge.models import Challenge, Lab, UserChallenge
-from challenge.views import _ensure_image_built, _resolve_build_path, _user_lab_lock, wait_for_health
+from challenge.views import (
+    _ensure_image_built, _get_container_name, _resolve_build_path, _user_lab_lock, wait_for_health,
+)
 
 
 class DoItFastDockerTests(TestCase):
@@ -179,18 +181,19 @@ class LabContainerTests(TestCase):
         container.remove.assert_not_called()
 
     def test_user_lab_lock_is_exclusive(self):
+        dave = User.objects.create_user("dave", password="pw")
         order = []
         held = threading.Event()
 
         def first():
-            with _user_lab_lock("dave"):
+            with _user_lab_lock(dave):
                 held.set()
                 time.sleep(0.3)
                 order.append("first-done")
 
         def second():
             held.wait()
-            with _user_lab_lock("dave"):
+            with _user_lab_lock(dave):
                 order.append("second-in")
 
         threads = [threading.Thread(target=first), threading.Thread(target=second)]
@@ -208,16 +211,18 @@ class LabQuotaTests(TestCase):
         self.client.force_login(self.user)
         Lab.objects.create(name="xss_lab", build_location="dockerized_labs/xss_lab", port=5006)
 
-    def _container(self, name, status):
+    def _container(self, lab, status, owner=None):
+        owner = owner or self.user
         c = MagicMock()
-        c.name, c.status = name, status
+        c.name, c.status = f"lab-u{owner.pk}-{lab}", status
+        c.labels = {"pygoat.owner_id": str(owner.pk)}
         return c
 
     @patch("challenge.views.check_traefik_reachable", return_value=True)
     @patch("challenge.views.get_docker_client")
     def test_stopped_labs_do_not_count_toward_limit(self, get_client, _traefik):
         client = get_client.return_value
-        client.containers.list.return_value = [self._container("lab-carol-sql_injection_lab", "exited")]
+        client.containers.list.return_value = [self._container("sql_injection_lab", "exited")]
         client.containers.get.side_effect = docker.errors.NotFound("x")
         new = client.containers.create.return_value
         new.attrs = {"State": {"Health": {"Status": "healthy"}}}
@@ -231,7 +236,7 @@ class LabQuotaTests(TestCase):
     def test_restarted_lab_failing_health_is_not_deleted(self, get_client, _traefik):
         client = get_client.return_value
         client.containers.list.return_value = []
-        existing = self._container("lab-carol-xss_lab", "exited")
+        existing = self._container("xss_lab", "exited")
         existing.attrs = {"State": {"Health": {"Status": "unhealthy"}}}
         client.containers.get.return_value = existing
         resp = self.client.get("/challenge/start-lab/xss_lab/")
@@ -245,6 +250,77 @@ class LabQuotaTests(TestCase):
     @patch("challenge.views.get_docker_client")
     def test_running_labs_count_toward_limit(self, get_client, _traefik):
         get_client.return_value.containers.list.return_value = [
-            self._container("lab-carol-sql_injection_lab", "running")
+            self._container("sql_injection_lab", "running")
         ]
+        get_client.return_value.containers.get.side_effect = docker.errors.NotFound("x")
         self.assertEqual(self.client.get("/challenge/start-lab/xss_lab/").status_code, 429)
+
+
+class LabOwnerIdentityTests(TestCase):
+    """Usernames that sanitize to the same string must not share labs."""
+
+    def setUp(self):
+        Lab.objects.create(name="xss_lab", build_location="dockerized_labs/xss_lab", port=5006)
+        self.ab = User.objects.create_user("ab", password="pw")
+        self.a_dot_b = User.objects.create_user("a.b", password="pw")
+        lab = MagicMock()
+        lab.name, lab.status = f"lab-u{self.ab.pk}-xss_lab", "running"
+        lab.labels = {"pygoat.owner_id": str(self.ab.pk)}
+        lab.attrs = {"State": {"Health": {"Status": "healthy"}}}
+        self.ab_lab = lab
+        # Same victim lab under the old sanitized-username naming scheme
+        legacy = MagicMock()
+        legacy.name, legacy.status = "lab-ab-xss_lab", "running"
+        legacy.labels = {"pygoat.owner_id": str(self.ab.pk)}
+        self.legacy_lab = legacy
+
+    def _docker(self, get_client):
+        client = get_client.return_value
+        client.containers.list.return_value = [self.ab_lab, self.legacy_lab]
+        client.containers.get.side_effect = (
+            lambda name: self.ab_lab if name == self.ab_lab.name else (_ for _ in ()).throw(docker.errors.NotFound("x"))
+        )
+        client.containers.create.return_value.attrs = {"State": {"Health": {"Status": "healthy"}}}
+        return client
+
+    def test_container_names_use_distinct_user_ids(self):
+        self.assertNotEqual(
+            _get_container_name(self.ab, "xss_lab"), _get_container_name(self.a_dot_b, "xss_lab")
+        )
+
+    @patch("challenge.views.get_docker_client")
+    def test_colliding_user_cannot_list_victim_labs(self, get_client):
+        self._docker(get_client)
+        self.client.force_login(self.a_dot_b)
+        self.assertEqual(self.client.get("/challenge/list-labs/").json()["labs"], [])
+
+    @patch("challenge.views.get_docker_client")
+    def test_colliding_user_cannot_stop_victim_labs(self, get_client):
+        self._docker(get_client)
+        self.client.force_login(self.a_dot_b)
+        self.assertEqual(self.client.get("/challenge/stop-lab/xss_lab/").status_code, 404)
+        self.client.get("/challenge/stop-labs/")
+        for lab in (self.ab_lab, self.legacy_lab):
+            lab.stop.assert_not_called()
+            lab.remove.assert_not_called()
+
+    @patch("challenge.views.check_traefik_reachable", return_value=True)
+    @patch("challenge.views.get_docker_client")
+    def test_colliding_user_gets_own_container_not_victims(self, get_client, _traefik):
+        client = self._docker(get_client)
+        self.client.force_login(self.a_dot_b)
+        resp = self.client.get("/challenge/start-lab/xss_lab/")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertIn(f"lab-u{self.a_dot_b.pk}-xss_lab.", resp.json()["url"])
+        kwargs = client.containers.create.call_args.kwargs
+        self.assertEqual(kwargs["name"], f"lab-u{self.a_dot_b.pk}-xss_lab")
+        self.assertEqual(kwargs["labels"]["pygoat.owner_id"], str(self.a_dot_b.pk))
+
+    @patch("challenge.views.check_traefik_reachable", return_value=True)
+    @patch("challenge.views.get_docker_client")
+    def test_container_with_foreign_owner_label_is_not_reused(self, get_client, _traefik):
+        client = self._docker(get_client)
+        self.ab_lab.labels = {"pygoat.owner_id": str(self.a_dot_b.pk)}
+        self.client.force_login(self.ab)
+        self.assertEqual(self.client.get("/challenge/start-lab/xss_lab/").status_code, 409)
+        client.containers.create.assert_not_called()
